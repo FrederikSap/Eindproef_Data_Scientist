@@ -1,4 +1,4 @@
-# Price Imitator — Opening-Price Model for ECG
+# Price Imitator — Opening-Price Model
 
 Predicts an appropriate **opening price** for a reservable camping accommodation from its
 characteristics and historical demand. The model learns to *imitate* the price European
