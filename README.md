@@ -1,123 +1,132 @@
-# Price Imitator — Opening-Price Model
+# Campsite Price Imitator & Initializer
 
-Predicts an appropriate **opening price** for a reservable camping accommodation from its
-characteristics and historical demand. The model learns to *imitate* the price European
-Camping Group (ECG) has historically opened the booking window with, given comparable
-options in the same season.
+Machine-learning models that recommend the **opening price** for a campsite accommodation
+week, learned from two years of anonymised booking data. Two questions are tackled:
 
-Two notebooks make up the work:
+- **Imitator** — reproduce the price the campsite historically *opened* a week with
+  (`InitialPrice`).
+- **Initializer** — recommend a price tied to a **demand target** rather than history:
+  either the price at an *X%-occupancy* threshold (`TargetPrice`) or the price in market at
+  the season's *demand lift-off lead time* (`LeadTimePrice`).
 
-| Notebook | Purpose |
-|----------|---------|
-| [`Price_imitator_EDA.ipynb`](../notebooks/Price_imitator_EDA.ipynb) | Exploratory analysis that motivates every modelling choice. |
-| [`Price_imitator_Model.ipynb`](../notebooks/Price_imitator_Model.ipynb) | Feature engineering, target construction, train/test split, baselines, and two models. |
+All reusable logic lives in `src/`; the notebooks import, call and display.
 
-Code can be found on github.com/FrederikSap/Eindproef_Data_Scientist.git
+> **Scope:** the model notebook is currently a **low-season (LS) spring proof-of-concept**.
+> A *real* prior-year price exists only for 2025→2026 arrivals and the 2026 extract only
+> covers spring, so the held-out test set is LS-only. Metrics should be read as a PoC, not a
+> general all-season model.
+
 ---
 
 ## Data
 
-- **Source:** `data/raw/French_Riviera_Multiple_campsites_datasets_capacity_over_200_anonymised.csv` -- Not included because it contains sensitive bookingsdata
-- **Grain:** one row per `ReservableOptionId × WeekBeforeArrival × WeekStartDate × MarketGroupCode`.
-- **Key relationships established in the EDA:**
-  - `ReservableOptionId` maps **one-to-one** onto an arrival week (`WeekStartDate`).
-  - Each option carries **4 market groups**, each with its own bookings; these must be
-    aggregated up to a single option-week record before modelling.
+`data/raw/Mekong_Delta_Multiple_campsites_datasets_capacity_over_200_anonymised_final.csv`
+— an **anonymised** weekly booking extract (~1.2M snapshot rows, 3,842 reservable options,
+37 campsites, arrival years 2024–2026, 5 seasonal clusters HS/LS/S1/S2/WTR). For every
+option it records the discounted price and cumulative bookings at each *weeks-before-arrival*
+horizon. The raw file is never modified.
 
 ---
 
-## EDA — what it checks and why
+## Notebooks
 
-The EDA notebook is ordered so each section justifies a later modelling decision.
+### `notebooks/Price_imitator_EDA.ipynb` — Exploratory Data Analysis
+Two parts:
+- **Part 1 — The Data Story** (visual): price distribution & skew, the booking curve, price
+  decline from the opening price (with cuts/raises), the accommodation-range ladder,
+  last-year vs this-year price, campsite price ranking, **inter-campsite variability for the
+  same product**, demand-vs-price and sell-out timing, and a correlation heatmap.
+- **Part 2 — Methodology & Data Quality**: grain validation, market-group structure,
+  monotonicity/overbooking/missingness, prior-year completeness, feature diagnostics,
+  seasonal structure and the target definitions — each with a `➡ Decision` note linking the
+  finding to a modelling choice.
 
-1. **Load + shape** — read the CSV, parse `WeekStartDate`, derive `Year`.
-2. **Grain validation** — confirm `ReservableOptionId` uniquely identifies an arrival week.
-3. **Market-group structure** — show 4 market groups per option and aggregate bookings to
-   the option level.
-4. **Data-quality checks**
-   - *Monotonicity* — `CumulativeHistoricalBookedNights` never decreases as arrival approaches.
-   - *Overbooking* — flag rows where `TotalBookedNights > Capacity`.
-   - *LastYear missingness* — separate genuine prior-year data from placeholder fills.
-5. **Feature diagnostics**
-   - *Categorical cardinality* — flag high-cardinality fields (e.g. `CampsiteCode`) that
-     blow up one-hot width and destabilise Ridge.
-   - *Boolean constancy within `AccoTypeRangeCode`* — drop attributes fully determined by
-     the type|range encoding; keep those that carry independent signal.
-6. **Seasonal structure**
-   - `season_pivot` confirms every `SeasonalCluster` appears in **both** season years, so
-     the 2024→2025 split and the segment baseline have cross-year support.
-   - Capacity-weighted booking-fill per campsite (interactive campsite dropdown) shows the
-     fill-rate shape differs sharply by season → **targets must be defined per season.**
-7. **Target definition** — see below.
+### `notebooks/Price_imitator.ipynb` — Modelling pipeline
+Builds the option-week feature table and runs Ridge / Lasso / Random-Forest models against
+global-mean and **segment-mean** baselines, with `TimeSeriesSplit` CV and a log-price target.
+Steps:
+1. Setup & load → 2. Derive `InitialPrice` → 3. Train the **imitator** (`InitialPrice`) →
+4. Coverage analysis → 5–6. Derive `TargetPrice` → 7. Train the **occupancy initializer** →
+8. **Lead-time initializer** (`LeadTimePrice`) → 9. **Corrective** on-target experiment →
+10. Compare the three models' Random-Forest predictions (+ a price-path plot).
 
 ---
 
-## Target definition
+## Repository layout
 
-Both candidates collapse the option × horizon panel to **one target per reservable option**.
+```
+Eindwerk Syntra VDO/
+├── data/raw/            anonymised weekly extract (never modified)
+├── src/
+│   ├── mekong_delta_price_features.py   PriceFeatureBuilder: targets + engineered features
+│   ├── price_model_pipeline.py          PriceModelPipeline: Ridge/Lasso/RF, leakage-safe
+│   ├── coverage_analysis.py             CoverageAnalyzer: size the X%-occupancy threshold
+│   └── price_comparison.py              compare_rf_predictions across the models
+├── notebooks/
+│   ├── Price_imitator_EDA.ipynb         exploration (story → methodology)
+│   └── Price_imitator.ipynb             the modelling pipeline
 
-- **A — Demand-weighted opening price (used by the model).**
-  Collapse the 4 market groups into a single demand-weighted price per option × horizon
-  (weight = `CumulativeHistoricalBookedNights`), then read the price at the **opening of the
-  booking window** (largest `WeekBeforeArrival` with real demand). A *price imitator*:
-  reproduces the historical opening price. Well-defined for every option, no threshold
-  dials, dense and leakage-free.
-
-- **B — `TargetLabeler` good-price subset (future work).**
-  Label each option-week `underpriced` / `on_target` / `overpriced` from how it sold, and
-  train only on `on_target` rows. A *price initializer*: learns only from prices that
-  produced good outcomes. Discards most rows and depends on sell-out / occupancy
-  assumptions.
-
-The model uses **A**. **B** is the natural next step once the goal shifts from replicating
-to *correcting* historical pricing. (see last point continuation)
+```
 
 ---
 
-## Model pipeline
+## Setup & run
 
-1. **Feature engineering** (`Price_imitator_Model.ipynb`)
-   - `Year` from `WeekStartDate` for time-based splitting.
-   - `Bedrooms` extracted to integer.
-   - `AccoTypeRangeCode` split into `AccommodationType` + `RangeType`.
-   - `is_special_period` binary flag from `SpecialPeriodCode`.
-2. **Target construction** — demand-weighted `InitialPrice` per option (candidate A above),
-   collapsed to one row per `ReservableOptionId`.
-3. **Train/test split** — **2024 train / 2025 test** (never random across arrival weeks).
-    group campsites with low unique ReservableOptionId in 'other'
-4. **Missing values** — categorical columns (`Airco`, `TV`, `DeckingType`, `Bathrooms`)
-   imputed with the mode, fitted on train and test independently.
-5. **Encoding** — one-hot encode categoricals; `x_test` reindexed onto `x_train` columns
-   (`fill_value=0`) to keep the feature space aligned and leakage-free.
-6. **Scaling** — `StandardScaler` on numeric columns for Ridge only.
+- **Python 3.13** (system install; no conda needed).
+- Install the dependencies:
+  ```
+  pip install pandas numpy scikit-learn matplotlib seaborn ipywidgets jupyter
+  ```
+- Place the dataset at `data/raw/` (see above). Run **from the project root** so the
+  repo-relative paths resolve.
+- Open the notebooks in Jupyter / VS Code and **Run All**, or execute headlessly:
+  ```
+  python -m jupyter nbconvert --to notebook --execute --inplace notebooks/Price_imitator.ipynb
+  ```
 
-### Features
-
-`BrandGroupCode`, `CampsiteCode`, `is_special_period`, `SeasonalCluster`, `CampsiteType`,
-`AccommodationType`, `RangeType`, `Airco`, `Bedrooms`, `DeckingType`, `Bathrooms`, `TV`,
-`Capacity`.
-
-### Models
-
-- **Baselines** — global train-mean price; segment train-mean price
-  (`SeasonalCluster × AccommodationType × RangeType`, unseen segments → global mean).
-- **Ridge regression** — `RidgeCV` picks `alpha` by CV on train only; coefficients give
-  interpretable price drivers.
-- **Random Forest** — `GridSearchCV` over `max_depth` and `min_samples_leaf`; feature
-  importances show reliance.
+> If you edit a `src/` module while a kernel is open, **restart the kernel** (or use
+> `%autoreload`) so the new code is picked up.
 
 ---
 
-## Evaluation
+## Headline results (LS-spring test)
 
-- **Primary metric:** RMSE, reported overall **and per `SeasonalCluster`**.
-- Per-cluster RMSE compares Ridge and Random Forest against the segment baseline.
-- **Finding:** no single model wins everywhere. Random Forest is the best all-round choice
-  (beats the baseline in 4/5 tiers), but Ridge is materially better in the two important
-  tiers (HS, S1).
+All metrics are on the euro scale; the model's value is its **lift over the segment-mean
+baseline** (`SeasonalCluster × AccommodationType × RangeType`).
+
+| Model | Best R² | MAPE |
+|---|---|---|
+| **Imitator** (`InitialPrice`) | **RF 0.51** | 13.8% |
+| **Occupancy initializer** (`TargetPrice`) | Ridge/Lasso ~0.49 | ~16% |
+| **Lead-time initializer** (`LeadTimePrice`) | RF 0.45 | 17.9% |
+
+(Segment baselines: 0.30 / 0.17 / 0.15 respectively.) Full tables in
+[`summary.md`](summary.md) §4.
 
 ---
-## Continuation
 
-- Goal is to move from price-imitation to price-initialization-model (see EDA point 7B)
-  Due to job-hunting priorities this is not ready, goal is still to have it available at presentation
+## Key findings
+
+- A **segment mean is a strong baseline**; the models earn their keep mostly in the harder,
+  higher-value segments. Season is the dominant price driver, then range tier and campsite.
+- **Campsite-aware, hierarchical** last-year imputation (justified by the inter-campsite EDA)
+  was the single biggest model gain (imitator RF 0.35 → 0.50).
+- **Feature selection, validated by ablation**: dropped noisy last-year repricing-dynamics,
+  dropped a redundant `RangeType` one-hot (kept the ordinal), and fixed a silently-zero
+  `LastYearEarlyFill` — each step inspected and kept only if it helped.
+- The **lead-time target** is denser/less right-censored than the occupancy target.
+- Judging whether a recommended price is *better* (not just imitated) needs an **experiment**:
+  price is endogenous to demand/quality here, so an offline demand model isn't identifiable.
+
+---
+
+## Limitations
+
+- **LS-spring proof-of-concept** (data, not choice): no other-season rows exist in the 2026
+  test year, and a real last-year price exists for only ~40% of options.
+- The **X%-occupancy target is weakly supported / right-censored** (half of option-weeks
+  never reach 50% fill).
+- **Anonymisation** flattens some geography/quality signal and the range ladder.
+
+---
+
